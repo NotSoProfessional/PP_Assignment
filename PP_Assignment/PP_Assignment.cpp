@@ -23,14 +23,14 @@ int main(int argc, char** argv) {
 	int platform_id = 0;
 	int device_id = 0;
 	string image_filename = "test.pgm";
-	int nr_bins = 256;
+	int nr_bins = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
 		else if ((strcmp(argv[i], "-d") == 0) && (i < (argc - 1))) { device_id = atoi(argv[++i]); }
 		else if (strcmp(argv[i], "-l") == 0) { std::cout << ListPlatformsDevices() << std::endl; }
 		else if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { image_filename = argv[++i]; }
-		else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { nr_bins = atoi(argv[++i]); }
+		else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { nr_bins = atoi(argv[++i]); } // Added arg for custom bin sizes
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
 	}
 
@@ -38,28 +38,44 @@ int main(int argc, char** argv) {
 
 	//detect any potential exceptions
 	try {
-		
 		CImgDisplay disp_input;
+
+		// Open and read the image file header to find the bit-depth
+		// of the image
 		bool bit_16 = false;
 
 		string f;
 		fstream file;
 		file.open(image_filename);
-		for (int i = 0; i < 10; i++)
+		for (int i = 0; i < 100; i++)
 		{
 			getline(file, f);
-			cout << f << endl;
+
+			// 8-bit image
 			if (f == to_string(255)) {
 				disp_input = CImgDisplay(CImg<unsigned char>(image_filename.c_str()), "input");
+
+				// If not custom bin size set to 8-bit max
+				if (nr_bins <= 0 || nr_bins > 256) {
+					nr_bins = 256;
+				}
+
 				break;
 			}
 			else if (f == to_string(65535)) {
 				disp_input = CImgDisplay(CImg<unsigned short>(image_filename.c_str()), "input");
 				bit_16 = true;
+
+				// If not custom bin size set to 16-bit max
+				if (nr_bins <= 0 || nr_bins > 65536) {
+					nr_bins = 65536;
+				}
+
 				break;
 			}
 		}
 		
+		// Load input image
 		CImg<unsigned char> image_input(image_filename.c_str());
 		CImg<unsigned short> image_input_16(image_filename.c_str());
 		CImg<unsigned short> original;
@@ -71,6 +87,11 @@ int main(int argc, char** argv) {
 			original = image_input;
 		}
 		
+
+		// Check to see if the image is a colour image, if so
+		// convert to YCbCr and set the luminance channel as the
+		// image input, and copy the other channel so they can be
+		// recombined later
 		CImg<unsigned char> cb;
 		CImg<unsigned char> cr;
 
@@ -153,6 +174,8 @@ int main(int argc, char** argv) {
 
 		int max_wg = device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>();
 
+		// If the number of bins/work group size is over the maximum size
+		// of a work group on the device then 
 		if (group_size > max_wg && !bit_16) {
 			group_size = max_wg;
 		}
@@ -196,7 +219,6 @@ int main(int argc, char** argv) {
 			kernel_1.setArg(2, sizeof(cl_int), &nr_bins);
 		}
 		
-
 		cl::Kernel kernel_2;
 		if (!bit_16) {
 			kernel_2 = cl::Kernel(program, "scan_add");
@@ -258,9 +280,12 @@ int main(int argc, char** argv) {
 		cerr << kernel_1.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << std::endl;
 		cerr << device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
 
+		// Declare events for profiling
 		cl::Event histogram;
 		cl::Event cumulative;
 		cl::Event normalise;
+		cl::Event map;
+
 		cl::Event scan_atomic;
 		cl::Event global_hist_prof;
 		cl::Event belloch_prof;
@@ -271,30 +296,41 @@ int main(int argc, char** argv) {
 			queue.enqueueNDRangeKernel(kernel_1, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &histogram);
 			queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NullRange, NULL, &cumulative);
 			queue.enqueueNDRangeKernel(kernel_3, cl::NullRange, cl::NDRange(group_size), cl::NullRange, NULL, &normalise);
-			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NullRange);
+			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &map);
 		}
 		else {
 			queue.enqueueNDRangeKernel(kernel_1, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size), NULL, &histogram);
 			queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &cumulative);
 			queue.enqueueNDRangeKernel(kernel_3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &normalise);
-			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size));
+			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size), NULL, &map);
 		}
 		
-		normalise.wait();
+		vector<cl::Event> events;
+		events.push_back(map);
+		events.push_back(normalise);
+		events.push_back(cumulative);
+		events.push_back(histogram);
 
+		map.waitForEvents(events);
+		
+		//normalise.wait(); // Wait for final kernel to finish
 		std::cout << "Histogram: "
 			<< GetFullProfilingInfo(histogram, ProfilingResolution::PROF_US) << std::endl;
 		std::cout << "Cumulative: "
 			<< GetFullProfilingInfo(cumulative, ProfilingResolution::PROF_US) << std::endl;
 		std::cout << "Normalise: "
 			<< GetFullProfilingInfo(normalise, ProfilingResolution::PROF_US) << std::endl;
+		std::cout << "Map LUT: "
+			<< GetFullProfilingInfo(map, ProfilingResolution::PROF_US) << std::endl;
 
+		// If image is 8-bit then run and profile the data against un-optimised
+		// and different algorithms/methods 
 		if (!bit_16) {
 			queue.enqueueNDRangeKernel(global_hist, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &global_hist_prof);
 			queue.enqueueNDRangeKernel(scan_add_atomic, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &scan_atomic);
 			queue.enqueueNDRangeKernel(belloch2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
 
-			belloch_prof.wait();
+			belloch_prof.wait(); // Wait for final kernel to finish
 			
 			std::cout << endl << "---Other methods---" << endl;
 			std::cout << "Global Memory Histogram: "
@@ -311,9 +347,11 @@ int main(int argc, char** argv) {
 
 		std::cout << "D = " << hist << std::endl;
 
+		// Initialise output vectors
 		vector<unsigned short> out_16(input_elements, 0);
 		vector<unsigned char> out(input_elements, 0);
 
+		// Copy output data from the device to the host and into the appropriate vector
 		if (bit_16) {
 			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out_16.data()[0]);
 		}
@@ -321,11 +359,18 @@ int main(int argc, char** argv) {
 			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out.data()[0]);
 		}
 		
+
+		// Initialise image outputs and set first channel to output data
 		CImg<unsigned char> output_image(original.width(), original.height(), original.depth(), original.spectrum());
 		output_image.get_shared_channel(0) = CImg<unsigned char>(out.data(), original.width(), original.height(), original.depth(), 1);
+
 		CImg<unsigned short> output_image_16(original.width(), original.height(), original.depth(), original.spectrum());
 		output_image_16.get_shared_channel(0) = CImg<unsigned short>(out_16.data(), original.width(), original.height(), original.depth(), 1);
 
+
+		// If the input image is a colour image, add the colour
+		// channels back to the output image and convert it
+		// to an RGB image.
 		if (original.spectrum() == 3) {
 			output_image.get_shared_channel(1) = cb;
 			output_image.get_shared_channel(2) = cr;
@@ -333,8 +378,9 @@ int main(int argc, char** argv) {
 			output_image = output_image.get_YCbCrtoRGB();
 		}
 
-		CImgDisplay disp_output;
+		CImgDisplay disp_output; // Initialise output display
 
+		// Display final output image
 		if (bit_16) {
 			disp_output = CImgDisplay(output_image_16, "output");
 		}
@@ -342,7 +388,7 @@ int main(int argc, char** argv) {
 			disp_output = CImgDisplay(output_image, "output");
 		}
 
-
+		// Close program on ESCAPE key 
 		while (!disp_input.is_closed() && !disp_output.is_closed()
 			&& !disp_input.is_keyESC() && !disp_output.is_keyESC()) {
 			disp_input.wait(1);

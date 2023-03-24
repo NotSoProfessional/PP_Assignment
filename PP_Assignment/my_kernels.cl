@@ -36,8 +36,8 @@ kernel void histogram(global const uchar* A, global int* H, local int* L_H, cons
 kernel void histogram_16(global const ushort* A, global int* H, const int nr_bins) {
 	int id = get_global_id(0);
 
-	int bin_index = A[id] * nr_bins / 65535;//take value as a bin index
-	//printf("%d, ", bin_index);
+	ushort bin_index = A[id] * nr_bins / 65536;//take value as a bin index
+
 	atomic_inc(&H[bin_index]);//serial operation, not very efficient!
 }
 
@@ -88,6 +88,7 @@ kernel void scan_add(global const int* A, global int* B, local int* scratch_1, l
 kernel void scan_add_16(global const int* A, global int* B) {
 	int id = get_global_id(0);
 	int N = get_global_size(0);
+	int gs = get_local_size(0);
 
 	for (int i = id + 1; i < N && id < N; i++) {
 		if (B[i] != -1) {
