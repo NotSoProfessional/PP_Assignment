@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
 	//Part 1 - handle command line options such as device selection, verbosity, etc.
 	int platform_id = 0;
 	int device_id = 0;
-	string image_filename = "test_large.pgm";
+	string image_filename = "test.pgm";
 	int nr_bins = 0;
 
 	for (int i = 1; i < argc; i++) {
@@ -34,8 +34,6 @@ int main(int argc, char** argv) {
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
 	}
 
-	cout << image_filename << endl;
-
 	cimg::exception_mode(0);
 
 	//detect any potential exceptions
@@ -45,6 +43,8 @@ int main(int argc, char** argv) {
 		// Open and read the image file header to find the bit-depth
 		// of the image
 		bool bit_16 = false;
+
+		cout << image_filename << ", ";
 
 		string f;
 		fstream file;
@@ -57,18 +57,24 @@ int main(int argc, char** argv) {
 			if (f == to_string(255)) {
 				disp_input = CImgDisplay(CImg<unsigned char>(image_filename.c_str()), "input");
 
-				// If not custom bin size set to 8-bit max
+				cout << "8-bit" << ", ";
+
+				// If not custom bin size or is out of range set to 8-bit max
 				if (nr_bins <= 0 || nr_bins > 256) {
 					nr_bins = 256;
 				}
 
 				break;
 			}
+
+			// 16-bit image
 			else if (f == to_string(65535)) {
 				disp_input = CImgDisplay(CImg<unsigned short>(image_filename.c_str()), "input");
 				bit_16 = true;
 
-				// If not custom bin size set to 16-bit max
+				cout << "16-bit" << ", ";
+
+				// If not custom bin size or is out of range set to 16-bit max
 				if (nr_bins <= 0 || nr_bins > 65536) {
 					nr_bins = 65536;
 				}
@@ -102,26 +108,31 @@ int main(int argc, char** argv) {
 			cr = original.get_RGBtoYCbCr().channel(2);
 			image_input = image_input.get_RGBtoYCbCr();
 			image_input = image_input.channel(0);
+
+			cout << "Colour" << endl;
+		}
+		else {
+			cout << "Grayscale" << endl;
 		}
 
-		//Part 3 - host operations
-		//3.1 Select computing devices
+		// Part 3 - host operations
+		// 3.1 Select computing devices
 		cl::Context context = GetContext(platform_id, device_id);
 
-		//display the selected device
+		// Display the selected device
 		std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
 
-		//create a queue to which we will push commands for the device
+		// Create a queue to which we will push commands for the device
 		cl::CommandQueue queue(context, CL_QUEUE_PROFILING_ENABLE);
 
-		//3.2 Load & build the device code
+		// 3.2 Load & build the device code
 		cl::Program::Sources sources;
 
 		AddSources(sources, "my_kernels.cl");
 
 		cl::Program program(context, sources);
 
-		//build and debug the kernel code
+		// Build and debug the kernel code
 		try {
 			program.build();
 		}
@@ -134,8 +145,8 @@ int main(int argc, char** argv) {
 
 		typedef int tvector;
 
-		//Part 3 - memory allocation
-		//host - input
+		// Part 3 - memory allocation
+		// host - input
 		size_t input_elements = original.width() * original.height();//number of input elements
 		size_t input_size;
 		
@@ -182,7 +193,7 @@ int main(int argc, char** argv) {
 			group_size = max_wg;
 		}
 
-		//device - buffers
+		// Device - buffers
 		cl::Buffer buffer_A(context, CL_MEM_READ_ONLY, input_size);
 		cl::Buffer buffer_B(context, CL_MEM_READ_WRITE, output_size);
 		cl::Buffer buffer_C(context, CL_MEM_READ_WRITE, output_size);
@@ -191,7 +202,6 @@ int main(int argc, char** argv) {
 		cl::Buffer buffer_TEMP(context, CL_MEM_WRITE_ONLY, output_size);
 
 		//Part 4 - device operations
-
 		//4.1 copy array A to and initialise other arrays on device memory
 		if (bit_16) {
 			queue.enqueueWriteBuffer(buffer_A, CL_TRUE, 0, input_size, &image_input_16.data()[0]);
@@ -205,7 +215,6 @@ int main(int argc, char** argv) {
 		queue.enqueueWriteBuffer(buffer_D, CL_TRUE, 0, output_size, &B.data()[0]);
 
 		//4.2 Setup and execute all kernels (i.e. device code)
-
 		cl::Kernel kernel_1;
 		if (!bit_16) {
 			kernel_1 = cl::Kernel(program, "histogram");
@@ -243,8 +252,8 @@ int main(int argc, char** argv) {
 		kernel_3.setArg(2, sizeof(cl_int), &input_elements);
 		kernel_3.setArg(3, sizeof(cl_int), &nr_bins);
 
+
 		cl::Kernel kernel_4;
-		
 		if (!bit_16) {
 			kernel_4 = cl::Kernel(program, "apply_lut");
 		}
@@ -292,8 +301,7 @@ int main(int argc, char** argv) {
 		cl::Event global_hist_prof;
 		cl::Event belloch_prof;
 		
-		//call all kernels in a sequence
-
+		// Call all kernels in a sequence
 		if (bit_16) {
 			queue.enqueueNDRangeKernel(kernel_1, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &histogram);
 			queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NullRange, NULL, &cumulative);
@@ -307,15 +315,9 @@ int main(int argc, char** argv) {
 			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size), NULL, &map);
 		}
 		
-		vector<cl::Event> events;
-		events.push_back(map);
-		events.push_back(normalise);
-		events.push_back(cumulative);
-		events.push_back(histogram);
-
-		map.wait();
+		map.wait(); // Wait for final kernel to finish
 		
-		//normalise.wait(); // Wait for final kernel to finish
+		// Print profiling results
 		std::cout << "Histogram: "
 			<< GetFullProfilingInfo(histogram, ProfilingResolution::PROF_US) << std::endl;
 		std::cout << "Cumulative: "
@@ -324,6 +326,7 @@ int main(int argc, char** argv) {
 			<< GetFullProfilingInfo(normalise, ProfilingResolution::PROF_US) << std::endl;
 		std::cout << "Map LUT: "
 			<< GetFullProfilingInfo(map, ProfilingResolution::PROF_US) << std::endl;
+#
 
 		// If image is 8-bit then run and profile the data against un-optimised
 		// and different algorithms/methods 
@@ -334,6 +337,7 @@ int main(int argc, char** argv) {
 
 			belloch_prof.wait(); // Wait for final kernel to finish
 			
+			// Print profiling results
 			std::cout << endl << "---Other methods---" << endl;
 			std::cout << "Atomic Histogram: "
 				<< GetFullProfilingInfo(global_hist_prof, ProfilingResolution::PROF_US) << std::endl;
@@ -345,7 +349,7 @@ int main(int argc, char** argv) {
 		
 		//4.3 Copy the result from device to host
 		vector<int> hist(group_size);
-		queue.enqueueReadBuffer(buffer_B, CL_TRUE, 0, group_size*sizeof(int), &hist[0]);
+		queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size*sizeof(int), &hist[0]);
 
 		std::cout << "D = " << hist << std::endl;
 

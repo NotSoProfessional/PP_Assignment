@@ -93,8 +93,13 @@ kernel void scan_add(global const int* A, global int* B, local int* scratch_1, l
 kernel void scan_add_atomic(global int* A, global int* B) {
 	int id = get_global_id(0);
 	int N = get_global_size(0);
-	for (int i = id + 1; i < N && id < N; i++)
-		atomic_add(&B[i], A[id]);
+
+	for (int i = id; i < N && id < N; i++) {
+		if (A[i] != -1) {
+			atomic_add(&B[i], A[id]);
+		}
+	}
+
 }
 
 kernel void normalise(global const int* H, global int* N_H, const int im_size, const int nr_bins) {
@@ -112,8 +117,8 @@ kernel void apply_lut(global const uchar* I, global const int* LUT, global uchar
 	float t_bins = nr_bins;
 	int index = I[id] * (t_bins / bins);
 
-	uchar val_new = LUT[index] * (bins / (nr_bins-1));
-	
+	uchar val_new = LUT[index] * (bins / (nr_bins - 1));
+
 	O[id] = val_new;
 }
 
