@@ -14,6 +14,8 @@ void print_help() {
 	std::cerr << "  -l : list all platforms and devices" << std::endl;
 	std::cerr << "  -f : input image file (default: test.ppm)" << std::endl;
 	std::cerr << "  -h : print this message" << std::endl;
+	std::cerr << "  -b : custom bin size" << std::endl;
+	std::cerr << "  -m : scan method" << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -24,12 +26,14 @@ int main(int argc, char** argv) {
 	int device_id = 0;
 	string image_filename = "test.pgm";
 	int nr_bins = 0;
+	int scan_method = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
 		else if ((strcmp(argv[i], "-d") == 0) && (i < (argc - 1))) { device_id = atoi(argv[++i]); }
 		else if (strcmp(argv[i], "-l") == 0) { std::cout << ListPlatformsDevices() << std::endl; }
 		else if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { image_filename = argv[++i]; }
+		else if ((strcmp(argv[i], "-m") == 0) && (i < (argc - 1))) { scan_method = atoi(argv[++i]); } // Added arg for scan method
 		else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { nr_bins = atoi(argv[++i]); } // Added arg for custom bin sizes
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
 	}
@@ -109,10 +113,24 @@ int main(int argc, char** argv) {
 			image_input = image_input.get_RGBtoYCbCr();
 			image_input = image_input.channel(0);
 
-			cout << "Colour" << endl;
+			cout << "Colour, ";
 		}
 		else {
-			cout << "Grayscale" << endl;
+			cout << "Grayscale, ";
+		}
+
+		cout << nr_bins << " bins" << endl;
+
+		if (!bit_16) {
+			if (scan_method < 1) {
+				cout << "Using Hillis-Steele scan method" << endl;
+			}
+			else {
+				cout << "Using Blelloch scan method" << endl;
+			}
+		}
+		else {
+			cout << "Using atomic scan method" << endl;
 		}
 
 		// Part 3 - host operations
@@ -143,8 +161,6 @@ int main(int argc, char** argv) {
 			throw err;
 		}
 
-		typedef int tvector;
-
 		// Part 3 - memory allocation
 		// host - input
 		size_t input_elements = original.width() * original.height();//number of input elements
@@ -172,6 +188,8 @@ int main(int argc, char** argv) {
 
 		padding_size = nr_bins % 32;
 
+		//if the input vector is not a multiple of the local_size
+		//insert additional neutral elements (0 for addition) so that the total will not be affected
 		if (padding_size) {
 			//create an extra vector with neutral values
 			std::vector<int> B_ext(32 - padding_size, -1);
@@ -179,19 +197,18 @@ int main(int argc, char** argv) {
 			B.insert(B.end(), B_ext.begin(), B_ext.end());
 		}
 
-
 		cl::Device device = context.getInfo<CL_CONTEXT_DEVICES>()[0];
 		
 		int group_size = B.size();
-		size_t output_size = B.size() * sizeof(tvector);//size in bytes
+		size_t output_size = B.size() * sizeof(int);//size in bytes
 
 		int max_wg = device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>();
 
 		// If the number of bins/work group size is over the maximum size
 		// of a work group on the device then 
-		if (group_size > max_wg && !bit_16) {
-			group_size = max_wg;
-		}
+		//if (group_size > max_wg && !bit_16) {
+		//	group_size = max_wg;
+		//}
 
 		// Device - buffers
 		cl::Buffer buffer_A(context, CL_MEM_READ_ONLY, input_size);
@@ -286,6 +303,7 @@ int main(int argc, char** argv) {
 
 		cl::Kernel belloch3 = cl::Kernel(program, "scan_bl_local");
 		belloch3.setArg(0, buffer_B);
+		belloch3.setArg(1, buffer_C);
 		//belloch3.setArg(1, cl::Local(nr_bins * sizeof(int)));
 
 		cerr << kernel_1.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << std::endl;
@@ -310,7 +328,14 @@ int main(int argc, char** argv) {
 		}
 		else {
 			queue.enqueueNDRangeKernel(kernel_1, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size), NULL, &histogram);
-			queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &cumulative);
+
+			if (scan_method < 1) {
+				queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &cumulative);
+			}
+			else {
+				queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &cumulative);
+			}
+			
 			queue.enqueueNDRangeKernel(kernel_3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &normalise);
 			queue.enqueueNDRangeKernel(kernel_4, cl::NullRange, cl::NDRange(input_elements), cl::NDRange(group_size), NULL, &map);
 		}
@@ -333,7 +358,13 @@ int main(int argc, char** argv) {
 		if (!bit_16) {
 			queue.enqueueNDRangeKernel(global_hist, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &global_hist_prof);
 			queue.enqueueNDRangeKernel(scan_add_atomic, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &scan_atomic);
-			queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+
+			if (scan_method < 1) {
+				queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+			}
+			else {
+				queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+			}
 
 			belloch_prof.wait(); // Wait for final kernel to finish
 			
@@ -343,15 +374,28 @@ int main(int argc, char** argv) {
 				<< GetFullProfilingInfo(global_hist_prof, ProfilingResolution::PROF_US) << std::endl;
 			std::cout << "Atomic Scan: "
 				<< GetFullProfilingInfo(scan_atomic, ProfilingResolution::PROF_US) << std::endl;
-			std::cout << "Blelloch Scan: "
-				<< GetFullProfilingInfo(belloch_prof, ProfilingResolution::PROF_US) << std::endl;
+
+			if (scan_method < 1) {
+				std::cout << "Blelloch Scan: ";	
+			}
+			else {
+				cout << "Hillis-Steele: ";
+			}
+
+			cout << GetFullProfilingInfo(belloch_prof, ProfilingResolution::PROF_US) << std::endl;
+			
 		}
 		
 		//4.3 Copy the result from device to host
 		vector<int> hist(group_size);
-		queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size*sizeof(int), &hist[0]);
-
-		std::cout << "D = " << hist << std::endl;
+		vector<int> cum(group_size);
+		vector<int> norm(group_size);
+		queue.enqueueReadBuffer(buffer_B, CL_TRUE, 0, group_size * sizeof(int), &hist[0]);
+		queue.enqueueReadBuffer(buffer_C, CL_TRUE, 0, group_size*sizeof(int), &cum[0]);
+		queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size * sizeof(int), &norm[0]);
+		std::cout << "B = " << hist << std::endl;
+		std::cout << "C = " << cum << std::endl;
+		std::cout << "D = " << norm << std::endl;
 
 		// Initialise output vectors
 		vector<unsigned short> out_16(input_elements, 0);

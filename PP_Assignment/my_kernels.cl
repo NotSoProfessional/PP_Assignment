@@ -115,9 +115,9 @@ kernel void apply_lut(global const uchar* I, global const int* LUT, global uchar
 	int id = get_global_id(0);
 	float bins = 255;
 	float t_bins = nr_bins;
-	int index = I[id] * (t_bins / bins);
+	int index = I[id] * (t_bins / (bins));
 
-	uchar val_new = LUT[index] * (bins / (nr_bins - 1));
+	uchar val_new = LUT[index] * (bins / (nr_bins-1));
 
 	O[id] = val_new;
 }
@@ -163,9 +163,10 @@ kernel void scan_bl(global int* A) {
 			A[idx] += temp;
 		}
 	}
+	barrier(CLK_GLOBAL_MEM_FENCE);
 }
 
-kernel void scan_bl_local(global int* A) {
+kernel void scan_bl_local(global int* A, global int* B) {
 	int id = get_global_id(0);
 	int N = get_global_size(0);
 	local int lA[2048];
@@ -205,7 +206,7 @@ kernel void scan_bl_local(global int* A) {
 
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	A[id] = lA[id];
+	B[id] = lA[id];
 	//printf("%d, %d\n", id, A[id]);
 }
 
