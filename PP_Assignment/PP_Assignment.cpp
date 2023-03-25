@@ -15,7 +15,8 @@ void print_help() {
 	std::cerr << "  -f : input image file (default: test.ppm)" << std::endl;
 	std::cerr << "  -h : print this message" << std::endl;
 	std::cerr << "  -b : custom bin size" << std::endl;
-	std::cerr << "  -m : scan method" << std::endl;
+	std::cerr << "  -m : scan method (0, Hills, 1, Blelloch)" << std::endl;
+	std::cerr << "  -o : output intermediate vectors" << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -27,6 +28,7 @@ int main(int argc, char** argv) {
 	string image_filename = "test.pgm";
 	int nr_bins = 0;
 	int scan_method = 0;
+	int output = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
@@ -35,6 +37,7 @@ int main(int argc, char** argv) {
 		else if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { image_filename = argv[++i]; }
 		else if ((strcmp(argv[i], "-m") == 0) && (i < (argc - 1))) { scan_method = atoi(argv[++i]); } // Added arg for scan method
 		else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { nr_bins = atoi(argv[++i]); } // Added arg for custom bin sizes
+		else if ((strcmp(argv[i], "-o") == 0) && (i < (argc - 1))) { output = atoi(argv[++i]); } // Added arg for custom bin sizes
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
 	}
 
@@ -138,7 +141,7 @@ int main(int argc, char** argv) {
 		cl::Context context = GetContext(platform_id, device_id);
 
 		// Display the selected device
-		std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
+		std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl << endl;
 
 		// Create a queue to which we will push commands for the device
 		cl::CommandQueue queue(context, CL_QUEUE_PROFILING_ENABLE);
@@ -177,19 +180,19 @@ int main(int argc, char** argv) {
 
 		size_t padding_size = input_elements % 32;
 
-		//if the input vector is not a multiple of the local_size
-		//insert additional neutral elements (0 for addition) so that the total will not be affected
-		if (padding_size) {
+		// if the input vector is not a multiple of the local_size
+		// insert additional neutral elements (0 for addition) so that the total will not be affected
+		/*if (padding_size) {
 			//create an extra vector with neutral values
 			std::vector<int> B_ext(32 - padding_size, -1);
 			//append that extra vector to our input
 			B.insert(B.end(), B_ext.begin(), B_ext.end());
-		}
+		}*/
 
+		//If bin size is not a multiple of 32 (preferred work group size)
+		// then pad the bin vector with -1 values
 		padding_size = nr_bins % 32;
 
-		//if the input vector is not a multiple of the local_size
-		//insert additional neutral elements (0 for addition) so that the total will not be affected
 		if (padding_size) {
 			//create an extra vector with neutral values
 			std::vector<int> B_ext(32 - padding_size, -1);
@@ -220,16 +223,21 @@ int main(int argc, char** argv) {
 
 		//Part 4 - device operations
 		//4.1 copy array A to and initialise other arrays on device memory
+
+		cl::Event im_write_prof;
+		cl::Event hist_write_prof;
+		//cl::Event 
+
 		if (bit_16) {
-			queue.enqueueWriteBuffer(buffer_A, CL_TRUE, 0, input_size, &image_input_16.data()[0]);
+			queue.enqueueWriteBuffer(buffer_A, CL_TRUE, 0, input_size, &image_input_16.data()[0], NULL, &im_write_prof);
 		}
 		else {
-			queue.enqueueWriteBuffer(buffer_A, CL_TRUE, 0, input_size, &image_input.data()[0]);
+			queue.enqueueWriteBuffer(buffer_A, CL_TRUE, 0, input_size, &image_input.data()[0], NULL, &im_write_prof);
 		}
 		
-		queue.enqueueWriteBuffer(buffer_B, CL_TRUE, 0, output_size, &B.data()[0]);//zero B buffer on device memory
-		queue.enqueueWriteBuffer(buffer_C, CL_TRUE, 0, output_size, &B.data()[0]);
-		queue.enqueueWriteBuffer(buffer_D, CL_TRUE, 0, output_size, &B.data()[0]);
+		//queue.enqueueWriteBuffer(buffer_B, CL_TRUE, 0, output_size, &B.data()[0]);//zero B buffer on device memory
+		//queue.enqueueWriteBuffer(buffer_C, CL_TRUE, 0, output_size, &B.data()[0]);
+		//queue.enqueueWriteBuffer(buffer_D, CL_TRUE, 0, output_size, &B.data()[0]);
 
 		//4.2 Setup and execute all kernels (i.e. device code)
 		cl::Kernel kernel_1;
@@ -306,8 +314,8 @@ int main(int argc, char** argv) {
 		belloch3.setArg(1, buffer_C);
 		//belloch3.setArg(1, cl::Local(nr_bins * sizeof(int)));
 
-		cerr << kernel_1.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << std::endl;
-		cerr << device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
+		//cerr << kernel_1.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << std::endl;
+		//cerr << device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>() << std::endl;
 
 		// Declare events for profiling
 		cl::Event histogram;
@@ -342,60 +350,7 @@ int main(int argc, char** argv) {
 		
 		map.wait(); // Wait for final kernel to finish
 		
-		// Print profiling results
-		std::cout << "Histogram: "
-			<< GetFullProfilingInfo(histogram, ProfilingResolution::PROF_US) << std::endl;
-		std::cout << "Cumulative: "
-			<< GetFullProfilingInfo(cumulative, ProfilingResolution::PROF_US) << std::endl;
-		std::cout << "Normalise: "
-			<< GetFullProfilingInfo(normalise, ProfilingResolution::PROF_US) << std::endl;
-		std::cout << "Map LUT: "
-			<< GetFullProfilingInfo(map, ProfilingResolution::PROF_US) << std::endl;
-#
-
-		// If image is 8-bit then run and profile the data against un-optimised
-		// and different algorithms/methods 
-		if (!bit_16) {
-			queue.enqueueNDRangeKernel(global_hist, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &global_hist_prof);
-			queue.enqueueNDRangeKernel(scan_add_atomic, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &scan_atomic);
-
-			if (scan_method < 1) {
-				queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
-			}
-			else {
-				queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
-			}
-
-			belloch_prof.wait(); // Wait for final kernel to finish
-			
-			// Print profiling results
-			std::cout << endl << "---Other methods---" << endl;
-			std::cout << "Atomic Histogram: "
-				<< GetFullProfilingInfo(global_hist_prof, ProfilingResolution::PROF_US) << std::endl;
-			std::cout << "Atomic Scan: "
-				<< GetFullProfilingInfo(scan_atomic, ProfilingResolution::PROF_US) << std::endl;
-
-			if (scan_method < 1) {
-				std::cout << "Blelloch Scan: ";	
-			}
-			else {
-				cout << "Hillis-Steele: ";
-			}
-
-			cout << GetFullProfilingInfo(belloch_prof, ProfilingResolution::PROF_US) << std::endl;
-			
-		}
-		
-		//4.3 Copy the result from device to host
-		vector<int> hist(group_size);
-		vector<int> cum(group_size);
-		vector<int> norm(group_size);
-		queue.enqueueReadBuffer(buffer_B, CL_TRUE, 0, group_size * sizeof(int), &hist[0]);
-		queue.enqueueReadBuffer(buffer_C, CL_TRUE, 0, group_size*sizeof(int), &cum[0]);
-		queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size * sizeof(int), &norm[0]);
-		std::cout << "B = " << hist << std::endl;
-		std::cout << "C = " << cum << std::endl;
-		std::cout << "D = " << norm << std::endl;
+		cl::Event im_read_prof;
 
 		// Initialise output vectors
 		vector<unsigned short> out_16(input_elements, 0);
@@ -403,12 +358,11 @@ int main(int argc, char** argv) {
 
 		// Copy output data from the device to the host and into the appropriate vector
 		if (bit_16) {
-			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out_16.data()[0]);
+			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out_16.data()[0], NULL, &im_read_prof);
 		}
 		else {
-			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out.data()[0]);
+			queue.enqueueReadBuffer(buffer_E, CL_TRUE, 0, input_size, &out.data()[0], NULL, &im_read_prof);
 		}
-		
 
 		// Initialise image outputs and set first channel to output data
 		CImg<unsigned char> output_image(original.width(), original.height(), original.depth(), original.spectrum());
@@ -436,6 +390,73 @@ int main(int argc, char** argv) {
 		}
 		else {
 			disp_output = CImgDisplay(output_image, "output");
+		}
+
+		// Print profiling results
+		std::cout << "Histogram: "
+			<< GetFullProfilingInfo(histogram, ProfilingResolution::PROF_US) << std::endl;
+		std::cout << "Cumulative: "
+			<< GetFullProfilingInfo(cumulative, ProfilingResolution::PROF_US) << std::endl;
+		std::cout << "Normalise: "
+			<< GetFullProfilingInfo(normalise, ProfilingResolution::PROF_US) << std::endl;
+		std::cout << "Map LUT: "
+			<< GetFullProfilingInfo(map, ProfilingResolution::PROF_US) << std::endl << endl;
+
+		std::cout << "Image Input vector write time [ns]: " <<
+			im_write_prof.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+			im_write_prof.getProfilingInfo<CL_PROFILING_COMMAND_START>() << std::endl;
+		std::cout << "Image Input vector read time [ns]: " <<
+			im_read_prof.getProfilingInfo<CL_PROFILING_COMMAND_END>() -
+			im_read_prof.getProfilingInfo<CL_PROFILING_COMMAND_START>() << std::endl << endl;
+
+		//4.3 Copy the result from device to host
+		if (output) {
+
+			// Initialise output vectors
+			vector<int> hist(group_size);
+			vector<int> cum(group_size);
+			vector<int> norm(group_size);
+
+			queue.enqueueReadBuffer(buffer_B, CL_TRUE, 0, group_size * sizeof(int), &hist[0]);
+			queue.enqueueReadBuffer(buffer_C, CL_TRUE, 0, group_size * sizeof(int), &cum[0]);
+			queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size * sizeof(int), &norm[0]);
+
+			cout << "Histogram = " << hist << endl << endl;
+			cout << "Cumulative = " << cum << endl << endl;
+			cout << "LUT = " << norm << endl << endl;
+		}
+
+		// If image is 8-bit then run and profile the data against un-optimised
+		// and different algorithms/methods 
+		if (!bit_16) {
+			queue.enqueueNDRangeKernel(global_hist, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &global_hist_prof);
+			queue.enqueueNDRangeKernel(scan_add_atomic, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &scan_atomic);
+
+			if (scan_method < 1) {
+				queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+			}
+			else {
+				queue.enqueueNDRangeKernel(kernel_2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+			}
+
+			belloch_prof.wait(); // Wait for final kernel to finish
+
+			// Print profiling results
+			std::cout << endl << "---Other methods---" << endl;
+			std::cout << "Atomic Histogram: "
+				<< GetFullProfilingInfo(global_hist_prof, ProfilingResolution::PROF_US) << std::endl;
+			std::cout << "Atomic Scan: "
+				<< GetFullProfilingInfo(scan_atomic, ProfilingResolution::PROF_US) << std::endl;
+
+			if (scan_method < 1) {
+				std::cout << "Blelloch Scan: ";
+			}
+			else {
+				cout << "Hillis-Steele: ";
+			}
+
+			cout << GetFullProfilingInfo(belloch_prof, ProfilingResolution::PROF_US) << std::endl << endl;
+
 		}
 
 		// Close program on ESCAPE key 
