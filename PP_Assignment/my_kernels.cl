@@ -20,27 +20,33 @@ kernel void histogram(global const uchar* A, global int* H, local int* L_H, cons
 	int id = get_global_id(0);
 	int lid = get_local_id(0);
 
-	int bin_index = A[id] * nr_bins / 256;//take value as a bin index
-	//printf("%d\n", A[id]);
-	L_H[lid] = 0;
+	// Take the pixel value and use as bin index, if custom bin size
+	// adjust index accordingly
+	int bin_index = A[id] * nr_bins / 256;
+
+	L_H[lid] = 0; // Set local array value to 0
 
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	atomic_inc(&L_H[bin_index]);
+	atomic_inc(&L_H[bin_index]); // Increment bin
 
 	barrier(CLK_LOCAL_MEM_FENCE);
 
-	atomic_add(&H[lid], L_H[lid]);//serial operation, not very efficient!
+	atomic_add(&H[lid], L_H[lid]); // Adds local bin count to global count
 }
 
+// Histogram kernel for 16-bit images, naive approach due to large bin size
 kernel void histogram_16(global const ushort* A, global int* H, const int nr_bins) {
 	int id = get_global_id(0);
 
-	ushort bin_index = A[id] * nr_bins / 65536;//take value as a bin index
+	// Take the pixel value and use as bin index, if custom bin size
+	// adjust index accordingly
+	ushort bin_index = A[id] * nr_bins / 65536;
 
-	atomic_inc(&H[bin_index]);//serial operation, not very efficient!
+	atomic_inc(&H[bin_index]); //serial operation, not very efficient!
 }
 
+// Atomic version of the histogram kernel
 kernel void histogram_atomic(global const uchar* A, global int* H, const int nr_bins) {
 	int id = get_global_id(0);
 
@@ -49,18 +55,18 @@ kernel void histogram_atomic(global const uchar* A, global int* H, const int nr_
 	atomic_inc(&H[bin_index]);//serial operation, not very efficient!
 }
 
+// Scan add kernel for making cumulative histogram
 kernel void scan_add(global const int* A, global int* B, local int* scratch_1, local int* scratch_2, const int bins) {
 	int id = get_global_id(0);
 	int lid = get_local_id(0);
 	int N = bins;
 	local int* scratch_3;//used for buffer swap
 
-
 	//cache all N values from global memory to local memory
 	scratch_1[lid] = A[id];
 
 	barrier(CLK_LOCAL_MEM_FENCE);//wait for all local threads to finish copying from global to local memory
-	//printf("%d\n", lid);
+
 	for (int i = 1; i < N; i *= 2) {
 		if (lid >= i) {
 			scratch_2[lid] = scratch_1[lid] + scratch_1[lid - i];
@@ -75,9 +81,7 @@ kernel void scan_add(global const int* A, global int* B, local int* scratch_1, l
 		scratch_3 = scratch_2;
 		scratch_2 = scratch_1;
 		scratch_1 = scratch_3;
-
 	}
-
 
 	//copy the cache to output array
 	if (lid < bins) {
@@ -85,18 +89,7 @@ kernel void scan_add(global const int* A, global int* B, local int* scratch_1, l
 	}
 }
 
-kernel void scan_add_16(global const int* A, global int* B) {
-	int id = get_global_id(0);
-	int N = get_global_size(0);
-	int gs = get_local_size(0);
-
-	for (int i = id + 1; i < N && id < N; i++) {
-		if (B[i] != -1) {
-			atomic_add(&B[i], A[id]);
-		}
-	}
-}
-
+// Atomic scan kernel for 16-bit images
 kernel void scan_add_atomic(global int* A, global int* B) {
 	int id = get_global_id(0);
 	int N = get_global_size(0);
@@ -113,23 +106,12 @@ kernel void normalise(global const int* H, global int* N_H, const int im_size, c
 	}
 }
 
-
-kernel void normalise_16(global const int* H, global int* N_H, const int im_size, const int nr_bins) {
-	int id = get_global_id(0);
-	float total = im_size;
-
-	if (H[id] != -1) {
-		N_H[id] = (H[id] / total) * (nr_bins - 1);
-	}
-}
-
 kernel void apply_lut(global const uchar* I, global const int* LUT, global uchar* O, const int nr_bins) {
 	int id = get_global_id(0);
 	float bins = 255;
 	float t_bins = nr_bins;
 	int index = I[id] * (t_bins / bins);
 
-	//int val_new = LUT[index] * (bins/nr_bins);
 	uchar val_new = LUT[index] * (bins / (nr_bins-1));
 	
 	O[id] = val_new;
@@ -164,8 +146,6 @@ kernel void scan_bl(global int* A) {
 		A[N - 1] = 0;
 	}
 
-	//printf("%d, %d\n", id, A[id]);
-
 	barrier(CLK_GLOBAL_MEM_FENCE);
 
 	// Downsweep
@@ -178,11 +158,6 @@ kernel void scan_bl(global int* A) {
 			A[idx] += temp;
 		}
 	}
-
-	barrier(CLK_GLOBAL_MEM_FENCE);
-
-
-	//printf("%d, %d\n", id, A[id]);
 }
 
 kernel void scan_bl_local(global int* A) {

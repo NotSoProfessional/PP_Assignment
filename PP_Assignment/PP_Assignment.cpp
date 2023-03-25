@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
 	//Part 1 - handle command line options such as device selection, verbosity, etc.
 	int platform_id = 0;
 	int device_id = 0;
-	string image_filename = "test.pgm";
+	string image_filename = "test_large.pgm";
 	int nr_bins = 0;
 
 	for (int i = 1; i < argc; i++) {
@@ -33,6 +33,8 @@ int main(int argc, char** argv) {
 		else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { nr_bins = atoi(argv[++i]); } // Added arg for custom bin sizes
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
 	}
+
+	cout << image_filename << endl;
 
 	cimg::exception_mode(0);
 
@@ -229,7 +231,7 @@ int main(int argc, char** argv) {
 			kernel_2.setArg(4, sizeof(cl_int), &nr_bins);
 		}
 		else {
-			kernel_2 = cl::Kernel(program, "scan_add_16");
+			kernel_2 = cl::Kernel(program, "scan_add_atomic");
 			kernel_2.setArg(0, buffer_B);
 			kernel_2.setArg(1, buffer_C);
 		}
@@ -274,7 +276,7 @@ int main(int argc, char** argv) {
 		belloch2.setArg(0, buffer_B);
 
 		cl::Kernel belloch3 = cl::Kernel(program, "scan_bl_local");
-		belloch3.setArg(0, buffer_TEMP);
+		belloch3.setArg(0, buffer_B);
 		//belloch3.setArg(1, cl::Local(nr_bins * sizeof(int)));
 
 		cerr << kernel_1.getWorkGroupInfo<CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE>(device) << std::endl;
@@ -311,7 +313,7 @@ int main(int argc, char** argv) {
 		events.push_back(cumulative);
 		events.push_back(histogram);
 
-		map.waitForEvents(events);
+		map.wait();
 		
 		//normalise.wait(); // Wait for final kernel to finish
 		std::cout << "Histogram: "
@@ -328,14 +330,14 @@ int main(int argc, char** argv) {
 		if (!bit_16) {
 			queue.enqueueNDRangeKernel(global_hist, cl::NullRange, cl::NDRange(input_elements), cl::NullRange, NULL, &global_hist_prof);
 			queue.enqueueNDRangeKernel(scan_add_atomic, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &scan_atomic);
-			queue.enqueueNDRangeKernel(belloch2, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
+			queue.enqueueNDRangeKernel(belloch3, cl::NullRange, cl::NDRange(group_size), cl::NDRange(group_size), NULL, &belloch_prof);
 
 			belloch_prof.wait(); // Wait for final kernel to finish
 			
 			std::cout << endl << "---Other methods---" << endl;
-			std::cout << "Global Memory Histogram: "
+			std::cout << "Atomic Histogram: "
 				<< GetFullProfilingInfo(global_hist_prof, ProfilingResolution::PROF_US) << std::endl;
-			std::cout << "Scan Add Atomic: "
+			std::cout << "Atomic Scan: "
 				<< GetFullProfilingInfo(scan_atomic, ProfilingResolution::PROF_US) << std::endl;
 			std::cout << "Blelloch Scan: "
 				<< GetFullProfilingInfo(belloch_prof, ProfilingResolution::PROF_US) << std::endl;
@@ -343,7 +345,7 @@ int main(int argc, char** argv) {
 		
 		//4.3 Copy the result from device to host
 		vector<int> hist(group_size);
-		queue.enqueueReadBuffer(buffer_D, CL_TRUE, 0, group_size*sizeof(int), &hist[0]);
+		queue.enqueueReadBuffer(buffer_B, CL_TRUE, 0, group_size*sizeof(int), &hist[0]);
 
 		std::cout << "D = " << hist << std::endl;
 
